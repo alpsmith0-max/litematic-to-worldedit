@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Litematic → WorldEdit Converter · Kamikitten SMP</title>
+<style>
+  :root { --bg:#140b2b; --panel:#21134a; --edge:#4a2a94; --pink:#e697e6; --lilac:#bb88ea; --text:#f3e9ff; --dim:#b7a6d6; --ok:#9be7b0; --bad:#ff8fa3; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(ellipse at top,#2a1660 0%,var(--bg) 60%); color:var(--text);
+         font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; display:flex; justify-content:center; padding:48px 20px; }
+  main { width:100%; max-width:720px; }
+  h1 { font-size:clamp(1.6rem,4vw,2.2rem); margin:0 0 6px; letter-spacing:.01em; }
+  h1 span { color:var(--pink); }
+  .lede { color:var(--dim); margin:0 0 28px; }
+  #drop { display:block; border:2px dashed var(--edge); border-radius:14px; background:rgba(33,19,74,.6); padding:44px 24px; text-align:center;
+          cursor:pointer; transition:border-color .15s,background .15s; }
+  #drop:hover, #drop.over { border-color:var(--pink); background:rgba(74,42,148,.35); }
+  #drop:focus-within { outline:2px solid var(--pink); outline-offset:3px; }
+  #drop strong { display:block; font-size:1.15rem; margin-bottom:4px; }
+  #drop small { color:var(--dim); }
+  input[type=file] { position:absolute; opacity:0; width:1px; height:1px; }
+  #list { list-style:none; padding:0; margin:22px 0 0; display:grid; gap:10px; }
+  #list li { background:var(--panel); border:1px solid var(--edge); border-radius:10px; padding:14px 16px; display:flex; gap:14px; align-items:center; }
+  #list li .meta { flex:1; min-width:0; }
+  #list li .name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #list li .detail { color:var(--dim); font-size:.88rem; }
+  #list li.err .detail { color:var(--bad); }
+  a.dl { background:linear-gradient(180deg,var(--pink),var(--lilac)); color:#1a0b3e; font-weight:700; text-decoration:none; padding:8px 14px; border-radius:8px; white-space:nowrap; }
+  a.dl:focus-visible { outline:2px solid var(--text); outline-offset:2px; }
+  section.how { margin-top:34px; color:var(--dim); font-size:.95rem; }
+  section.how h2 { color:var(--text); font-size:1.05rem; margin:0 0 8px; }
+  ol { padding-left:20px; margin:0; display:grid; gap:6px; }
+  code { background:#0e0720; color:var(--pink); padding:1px 6px; border-radius:5px; font-size:.9em; }
+  .note { margin-top:14px; font-size:.85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Litematic → <span>WorldEdit</span></h1>
+  <p class="lede">Turn Litematica <code>.litematic</code> builds into WorldEdit <code>.schem</code> files. Everything runs in your browser — nothing is uploaded.</p>
+
+  <label id="drop">
+    <input id="file" type="file" accept=".litematic" multiple>
+    <strong>Drop .litematic files here</strong>
+    <small>or click to choose · multiple files OK</small>
+  </label>
+
+  <ul id="list" aria-live="polite"></ul>
+
+  <section class="how">
+    <h2>Using it on the server</h2>
+    <ol>
+      <li>Put the <code>.schem</code> file in the server's <code>plugins/WorldEdit/schematics/</code> folder.</li>
+      <li>In game, stand where the build's corner should go and run <code>//schem load name</code>.</li>
+      <li>Run <code>//paste -a</code> (the <code>-a</code> skips air so it won't carve out terrain). Use <code>//undo</code> if it lands wrong.</li>
+    </ol>
+    <p class="note">Multi-region schematics are merged into one. Chests, signs, banners and other block data come along; mobs/item frames are included as entities (paste with <code>//paste -ae</code> to place them).</p>
+  </section>
+</main>
+<script>
+// Litematica (.litematic) -> Sponge schematic v3 (.schem) converter core. Works in browsers and Node 18+.
+(function (global) {
+  const T = { END: 0, BYTE: 1, SHORT: 2, INT: 3, LONG: 4, FLOAT: 5, DOUBLE: 6, BYTE_ARRAY: 7, STRING: 8, LIST: 9, COMPOUND: 10, INT_ARRAY: 11, LONG_ARRAY: 12 };
+  const enc = new TextEncoder(), dec = new TextDecoder();
+
+  function parseNBT(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let p = 0;
+    const str = () => { const n = dv.getUint16(p); p += 2; const s = dec.decode(bytes.subarray(p, p + n)); p += n; return s; };
+    function payload(t) {
+      switch (t) {
+        case T.BYTE: { const v = dv.getInt8(p); p += 1; return v; }
+        case T.SHORT: { const v = dv.getInt16(p); p += 2; return v; }
+        case T.INT: { const v = dv.getInt32(p); p += 4; return v; }
+        case T.LONG: { const v = dv.getBigInt64(p); p += 8; return v; }
+        case T.FLOAT: { const v = dv.getFloat32(p); p += 4; return v; }
+        case T.DOUBLE: { const v = dv.getFloat64(p); p += 8; return v; }
+        case T.BYTE_ARRAY: { const n = dv.getInt32(p); p += 4; const v = new Int8Array(bytes.slice(p, p + n).buffer); p += n; return v; }
+        case T.STRING: return str();
+        case T.LIST: {
+          const et = dv.getInt8(p); const n = dv.getInt32(p + 1); p += 5;
+          const items = []; for (let i = 0; i < n; i++) items.push({ t: et, v: payload(et) });
+          return { et, items };
+        }
+        case T.COMPOUND: {
+          const o = {};
+          for (;;) { const ct = dv.getInt8(p); p += 1; if (ct === T.END) return o; const k = str(); o[k] = { t: ct, v: payload(ct) }; }
+        }
+        case T.INT_ARRAY: { const n = dv.getInt32(p); p += 4; const v = new Int32Array(n); for (let i = 0; i < n; i++, p += 4) v[i] = dv.getInt32(p); return v; }
+        case T.LONG_ARRAY: {
+          // Stored as little-endian 32-bit words (lo, hi per long) so packed bits form one contiguous stream.
+          const n = dv.getInt32(p); p += 4; const w = new Uint32Array(n * 2);
+          for (let i = 0; i < n; i++, p += 8) { w[2 * i + 1] = dv.getUint32(p); w[2 * i] = dv.getUint32(p + 4); }
+          return w;
+        }
+        default: throw new Error('Unknown NBT tag type ' + t + ' at byte ' + p);
+      }
+    }
+    const t = dv.getInt8(p); p += 1;
+    if (t !== T.COMPOUND) throw new Error("This doesn't look like a Litematica file");
+    const name = str();
+    return { name, root: { t, v: payload(t) } };
+  }
+
+  function writeNBT(name, root) {
+    let buf = new Uint8Array(1 << 16), dv = new DataView(buf.buffer), p = 0;
+    const need = (n) => { if (p + n <= buf.length) return; let s = buf.length; while (s < p + n) s *= 2; const nb = new Uint8Array(s); nb.set(buf); buf = nb; dv = new DataView(buf.buffer); };
+    const str = (s) => { const b = enc.encode(s); need(2 + b.length); dv.setUint16(p, b.length); p += 2; buf.set(b, p); p += b.length; };
+    function payload(node) {
+      const v = node.v;
+      switch (node.t) {
+        case T.BYTE: need(1); dv.setInt8(p, v); p += 1; break;
+        case T.SHORT: need(2); dv.setInt16(p, v); p += 2; break;
+        case T.INT: need(4); dv.setInt32(p, v); p += 4; break;
+        case T.LONG: need(8); dv.setBigInt64(p, BigInt(v)); p += 8; break;
+        case T.FLOAT: need(4); dv.setFloat32(p, v); p += 4; break;
+        case T.DOUBLE: need(8); dv.setFloat64(p, v); p += 8; break;
+        case T.BYTE_ARRAY: need(4 + v.length); dv.setInt32(p, v.length); p += 4; buf.set(new Uint8Array(v.buffer, v.byteOffset, v.length), p); p += v.length; break;
+        case T.STRING: str(v); break;
+        case T.LIST: {
+          const et = v.items.length ? v.items[0].t : v.et;
+          need(5); dv.setInt8(p, et); dv.setInt32(p + 1, v.items.length); p += 5;
+          for (const it of v.items) payload(it);
+          break;
+        }
+        case T.COMPOUND:
+          for (const k of Object.keys(v)) { need(1); dv.setInt8(p, v[k].t); p += 1; str(k); payload(v[k]); }
+          need(1); dv.setInt8(p, 0); p += 1; break;
+        case T.INT_ARRAY: need(4 + 4 * v.length); dv.setInt32(p, v.length); p += 4; for (let i = 0; i < v.length; i++, p += 4) dv.setInt32(p, v[i]); break;
+        case T.LONG_ARRAY: { const n = v.length / 2; need(4 + 8 * n); dv.setInt32(p, n); p += 4; for (let i = 0; i < n; i++, p += 8) { dv.setUint32(p, v[2 * i + 1]); dv.setUint32(p + 4, v[2 * i]); } break; }
+        default: throw new Error('Cannot write tag type ' + node.t);
+      }
+    }
+    need(1); dv.setInt8(p, root.t); p += 1; str(name); payload(root);
+    return buf.slice(0, p);
+  }
+
+  async function pipe(bytes, stream) {
+    const out = new Response(new Blob([bytes]).stream().pipeThrough(stream));
+    return new Uint8Array(await out.arrayBuffer());
+  }
+  const isGzip = (b) => b.length > 2 && b[0] === 0x1f && b[1] === 0x8b;
+  const gunzip = (b) => (isGzip(b) ? pipe(b, new DecompressionStream('gzip')) : Promise.resolve(b));
+  const gzip = (b) => pipe(b, new CompressionStream('gzip'));
+
+  const n = (t, v) => ({ t, v });
+  const val = (c, k, d) => (c && c[k] ? c[k].v : d);
+
+  function blockStateString(entry) {
+    const c = entry.v, name = val(c, 'Name', 'minecraft:air'), props = val(c, 'Properties');
+    if (!props) return name;
+    const keys = Object.keys(props);
+    return keys.length ? name + '[' + keys.map((k) => k + '=' + props[k].v).join(',') + ']' : name;
+  }
+
+  function convertLitematic(root) {
+    const R = root.v, regions = val(R, 'Regions');
+    if (!regions || !Object.keys(regions).length) throw new Error('This file has no Litematica regions — is it really a .litematic?');
+    const meta = val(R, 'Metadata', {});
+    const dataVersion = val(R, 'MinecraftDataVersion', 3953);
+
+    const regs = Object.entries(regions).map(([rname, node]) => {
+      const r = node.v, pos = val(r, 'Position'), size = val(r, 'Size');
+      const P = [val(pos, 'x'), val(pos, 'y'), val(pos, 'z')], S = [val(size, 'x'), val(size, 'y'), val(size, 'z')];
+      const min = P.map((c, i) => (S[i] < 0 ? c + S[i] + 1 : c));
+      return { rname, r, min, dim: S.map(Math.abs) };
+    });
+    const lo = [0, 1, 2].map((i) => Math.min(...regs.map((g) => g.min[i])));
+    const hi = [0, 1, 2].map((i) => Math.max(...regs.map((g) => g.min[i] + g.dim[i])));
+    const [W, H, L] = [0, 1, 2].map((i) => hi[i] - lo[i]);
+    if (W > 65535 || H > 65535 || L > 65535) throw new Error('Schematic is too large for the .schem format');
+
+    const palette = new Map([['minecraft:air', 0]]);
+    const blocks = new Int32Array(W * H * L);
+    const blockEntities = [], entities = [];
+    let nonAir = 0;
+
+    for (const g of regs) {
+      const pal = val(g.r, 'BlockStatePalette').items.map(blockStateString);
+      const ids = pal.map((s) => { if (!palette.has(s)) palette.set(s, palette.size); return palette.get(s); });
+      const airIdx = new Set(pal.map((s, i) => (/^minecraft:(cave_|void_)?air$/.test(s) ? i : -1)));
+      const words = val(g.r, 'BlockStates');
+      const bits = Math.max(2, 32 - Math.clz32(pal.length - 1)), mask = bits >= 32 ? 0xffffffff : (1 << bits) - 1;
+      const [dx, dy, dz] = g.dim, ox = g.min[0] - lo[0], oy = g.min[1] - lo[1], oz = g.min[2] - lo[2];
+      let i = 0;
+      for (let y = 0; y < dy; y++) for (let z = 0; z < dz; z++) for (let x = 0; x < dx; x++, i++) {
+        const bp = i * bits, w = bp >>> 5, o = bp & 31;
+        let v = words[w] >>> o;
+        if (o + bits > 32) v |= words[w + 1] << (32 - o);
+        v = (v & mask) >>> 0;
+        if (v >= pal.length) throw new Error(`Corrupt block data in region "${g.rname}"`);
+        if (airIdx.has(v)) continue;
+        blocks[(x + ox) + (z + oz) * W + (y + oy) * W * L] = ids[v];
+        nonAir++;
+      }
+      for (const te of val(g.r, 'TileEntities', { items: [] }).items) {
+        const d = Object.assign({}, te.v);
+        const pos = [val(d, 'x') + ox, val(d, 'y') + oy, val(d, 'z') + oz];
+        delete d.x; delete d.y; delete d.z;
+        let id = val(d, 'id'); delete d.id;
+        if (!id) {
+          const s = [...palette.keys()][blocks[pos[0] + pos[2] * W + pos[1] * W * L]] || '';
+          id = s.split('[')[0];
+        }
+        blockEntities.push(n(T.COMPOUND, { Pos: n(T.INT_ARRAY, Int32Array.from(pos)), Id: n(T.STRING, id), Data: n(T.COMPOUND, d) }));
+      }
+      for (const en of val(g.r, 'Entities', { items: [] }).items) {
+        const d = Object.assign({}, en.v), id = val(d, 'id');
+        if (!id || !d.Pos) continue;
+        const pos = d.Pos.v.items.map((it, k) => it.v + [ox, oy, oz][k]);
+        delete d.Pos; delete d.id;
+        entities.push(n(T.COMPOUND, { Pos: n(T.LIST, { et: T.DOUBLE, items: pos.map((c) => n(T.DOUBLE, c)) }), Id: n(T.STRING, id), Data: n(T.COMPOUND, d) }));
+      }
+    }
+
+    const varints = new Uint8Array(blocks.length * 3);
+    let vp = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      let v = blocks[i];
+      while (v >= 0x80) { varints[vp++] = (v & 0x7f) | 0x80; v >>>= 7; }
+      varints[vp++] = v;
+    }
+    const pal = {};
+    for (const [s, id] of palette) pal[s] = n(T.INT, id);
+
+    const name = val(meta, 'Name', 'Converted');
+    const schem = n(T.COMPOUND, {
+      Schematic: n(T.COMPOUND, {
+        Version: n(T.INT, 3),
+        DataVersion: n(T.INT, dataVersion),
+        Metadata: n(T.COMPOUND, {
+          Name: n(T.STRING, name),
+          Author: n(T.STRING, val(meta, 'Author', 'Unknown')),
+          Date: n(T.LONG, BigInt(Date.now())),
+        }),
+        Width: n(T.SHORT, W << 16 >> 16), Height: n(T.SHORT, H << 16 >> 16), Length: n(T.SHORT, L << 16 >> 16),
+        Offset: n(T.INT_ARRAY, new Int32Array(3)),
+        Blocks: n(T.COMPOUND, {
+          Palette: n(T.COMPOUND, pal),
+          Data: n(T.BYTE_ARRAY, new Int8Array(varints.buffer, 0, vp)),
+          BlockEntities: n(T.LIST, { et: T.COMPOUND, items: blockEntities }),
+        }),
+        Entities: n(T.LIST, { et: T.COMPOUND, items: entities }),
+      }),
+    });
+    return {
+      schem,
+      info: { name, author: val(meta, 'Author', 'Unknown'), size: [W, H, L], blocks: nonAir, palette: palette.size, regions: regs.length, blockEntities: blockEntities.length, entities: entities.length, dataVersion },
+    };
+  }
+
+  async function litematicToSchem(fileBytes) {
+    const { root } = parseNBT(await gunzip(fileBytes));
+    const { schem, info } = convertLitematic(root);
+    return { bytes: await gzip(writeNBT('', schem)), info };
+  }
+
+  const api = { parseNBT, writeNBT, gunzip, gzip, convertLitematic, litematicToSchem, T };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api; else global.Litematic = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+<script>
+  const list = document.getElementById('list'), drop = document.getElementById('drop'), input = document.getElementById('file');
+  const fmt = (n) => n.toLocaleString();
+  async function handle(files) {
+    for (const f of files) {
+      const li = document.createElement('li');
+      li.innerHTML = '<div class="meta"><div class="name"></div><div class="detail">Converting…</div></div>';
+      li.querySelector('.name').textContent = f.name;
+      list.prepend(li);
+      const detail = li.querySelector('.detail');
+      try {
+        if (!/\.litematic$/i.test(f.name)) throw new Error('Not a .litematic file');
+        const { bytes, info } = await Litematic.litematicToSchem(new Uint8Array(await f.arrayBuffer()));
+        const out = f.name.replace(/\.litematic$/i, '').replace(/[^\w.-]+/g, '_') + '.schem';
+        const a = document.createElement('a');
+        a.className = 'dl'; a.textContent = 'Download'; a.download = out;
+        a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+        li.append(a);
+        li.querySelector('.name').textContent = out;
+        detail.textContent = `${info.size.join(' × ')} · ${fmt(info.blocks)} blocks · ${info.blockEntities} block entities` +
+          (info.entities ? ` · ${info.entities} entities` : '') + (info.regions > 1 ? ` · ${info.regions} regions merged` : '');
+      } catch (e) {
+        li.classList.add('err');
+        detail.textContent = e.message || 'Could not read this file';
+      }
+    }
+  }
+  input.addEventListener('change', () => { handle([...input.files]); input.value = ''; });
+  ['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => handle([...e.dataTransfer.files]));
+</script>
+</body>
+</html>
